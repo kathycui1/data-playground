@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Experiment data caches
+experiments/economic-data/data/
+
+# Matplotlib cache from local runs
+.mplconfig/
