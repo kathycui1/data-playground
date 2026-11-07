@@ -8,11 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-import statsmodels.formula.api as smf
 from plotly.subplots import make_subplots
 
-from fetch_world_bank import CACHE_PATH, load_or_fetch
+from compute import build_facts
+from fetch_world_bank import load_panel
 from panels import INDICATORS, latest_year_with_coverage, to_wide
+from schemas import Briefing, FactsPacket
 
 REPORT_PATH = Path(__file__).resolve().parent / "report.html"
 
@@ -121,6 +122,34 @@ td.num { font-variant-numeric: tabular-nums; }
   border-radius: 50%;
   flex: 0 0 auto;
 }
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.12rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  vertical-align: middle;
+  margin-left: 0.4rem;
+}
+.note-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+@media (min-width: 720px) {
+  .note-grid { grid-template-columns: 1fr 1fr; }
+}
+.note {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 0.85rem;
+  background: var(--bg);
+}
+.note h3 { margin: 0 0 0.3rem; font-size: 0.92rem; }
+.note p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+ul.plain { margin: 0.35rem 0 0; padding-left: 1.15rem; }
+ul.plain li { margin: 0.25rem 0; }
 """
 
 
@@ -401,18 +430,97 @@ def _pretty_term(term: str) -> str:
     return term
 
 
-def _regression_table(focus: pd.DataFrame):
-    model_df = focus.dropna(subset=["inflation", "unemployment"])
-    model = smf.ols("inflation ~ unemployment + C(country)", data=model_df).fit()
-    summary = pd.DataFrame(
+def _regression_table(facts: FactsPacket) -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "Term": [_pretty_term(t) for t in model.params.index],
-            "Coefficient": model.params.values.round(3),
-            "Std. error": model.bse.values.round(3),
-            "P-value": model.pvalues.values.round(3),
+            "Term": [_pretty_term(term.term) for term in facts.regression.terms],
+            "Coefficient": [term.coefficient for term in facts.regression.terms],
+            "Std. error": [term.std_error for term in facts.regression.terms],
+            "P-value": [term.p_value for term in facts.regression.terms],
         }
     )
-    return summary, model
+
+
+def _forecast_table(facts: FactsPacket) -> pd.DataFrame:
+    rows = []
+    for pred in facts.forecast.predictions:
+        rows.append(
+            {
+                "Country": pred.country,
+                "Last year": pred.last_year,
+                "Last inflation": pred.last_inflation,
+                f"Ridge {facts.forecast.horizon_year}": pred.predicted_inflation,
+                "Naive (last value)": pred.naive_inflation,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _iso_name(facts: FactsPacket, iso: str) -> str:
+    if iso == facts.world.iso:
+        return facts.world.country
+    for row in facts.focus:
+        if row.iso == iso:
+            return row.country
+    return iso
+
+
+def _briefing_html(facts: FactsPacket, briefing: Briefing | None) -> str:
+    if briefing is None or briefing.skipped_reason:
+        reason = (
+            html.escape(briefing.skipped_reason)
+            if briefing and briefing.skipped_reason
+            else "No briefing generated."
+        )
+        return (
+            "<section>"
+            "<h2>Model briefing</h2>"
+            '<p class="blurb">The LLM step is optional. Tables and charts are computed in Python.</p>'
+            f'<p class="meta">{reason}. Set <code>OPENAI_API_KEY</code> and rerun <code>pipeline.py</code> to fill this section.</p>'
+            "</section>"
+        )
+
+    notes = []
+    for note in briefing.country_notes:
+        notes.append(
+            "<div class='note'>"
+            f"<h3>{html.escape(_iso_name(facts, note.iso))}</h3>"
+            f"<p><strong>{html.escape(note.headline)}</strong> {html.escape(note.detail)}</p>"
+            "</div>"
+        )
+    highlights = "".join(
+        f"<li>{html.escape(_iso_name(facts, item.iso))}: "
+        f"{html.escape(item.metric)} {item.claimed_value:g}% — "
+        f"{html.escape(item.why_it_matters)}</li>"
+        for item in briefing.highlights
+    )
+    risks = "".join(f"<li>{html.escape(item)}</li>" for item in briefing.risks)
+    questions = "".join(
+        f"<li>{html.escape(item)}</li>" for item in briefing.follow_up_questions
+    )
+    drop_note = (
+        f" Dropped {briefing.dropped_highlights} highlight(s) whose numbers did not match the packet."
+        if briefing.dropped_highlights
+        else ""
+    )
+    model = html.escape(briefing.model or "chat model")
+    return (
+        "<section>"
+        "<h2>Model briefing"
+        f'<span class="badge">{model}</span></h2>'
+        '<p class="blurb">Narrative from an OpenAI-compatible chat model. '
+        f"Numbers in highlights are checked against the facts packet.{drop_note}</p>"
+        f"<p>{html.escape(briefing.executive_summary)}</p>"
+        f'<div class="note-grid">{"".join(notes)}</div>'
+        + (f'<p class="meta" style="margin-top:0.9rem">Highlights</p><ul class="plain">{highlights}</ul>' if highlights else "")
+        + (f'<p class="meta" style="margin-top:0.9rem">Risks / caveats</p><ul class="plain">{risks}</ul>' if risks else "")
+        + (
+            f'<p class="meta" style="margin-top:0.9rem">Follow-up questions</p><ul class="plain">{questions}</ul>'
+            if questions
+            else ""
+        )
+        + "</section>"
+    )
 
 
 def _df_to_html_table(frame: pd.DataFrame) -> str:
@@ -435,19 +543,33 @@ def _df_to_html_table(frame: pd.DataFrame) -> str:
     )
 
 
-def build_report(long: pd.DataFrame | None = None, path: Path = REPORT_PATH) -> Path:
+def build_report(
+    long: pd.DataFrame | None = None,
+    path: Path = REPORT_PATH,
+    facts: FactsPacket | None = None,
+    briefing: Briefing | None = None,
+) -> Path:
     if long is None:
-        long = load_or_fetch(CACHE_PATH)
+        long = load_panel()
+    if facts is None:
+        facts = build_facts(long)
 
     wide = to_wide(long)
     focus = wide[wide["is_focus"]].copy()
     countries = wide[~wide["is_aggregate"]].copy()
-    n_countries = int(countries["iso"].nunique())
-    year_min, year_max = int(wide["year"].min()), int(wide["year"].max())
+    n_countries = facts.n_countries
+    year_min, year_max = facts.year_min, facts.year_max
 
     corr_html = _df_to_html_table(_correlation_table(focus))
-    reg_table, model = _regression_table(focus)
+    reg_table = _regression_table(facts)
+    forecast_html = _df_to_html_table(_forecast_table(facts))
+    briefing_html = _briefing_html(facts, briefing)
     hist_fig, snap_year, focus_rows, n_hidden, xmax = _inflation_histogram(countries)
+    baseline_note = (
+        "Ridge beats the last-value naive baseline on the holdout MAE."
+        if facts.forecast.beats_naive
+        else "Ridge does not beat the last-value naive baseline on the holdout MAE."
+    )
 
     inflation_values = {
         row["country"]: f"{row['inflation']:.1f}%" for _, row in focus_rows.iterrows()
@@ -524,16 +646,22 @@ def build_report(long: pd.DataFrame | None = None, path: Path = REPORT_PATH) -> 
 
     <section>
       <h2>Data flow</h2>
-      <div class="pipeline" role="img" aria-label="World Bank API to parquet cache to analysis to HTML report">
+      <div class="pipeline" role="img" aria-label="World Bank API to parquet to facts packet to optional LLM to HTML report">
         <span class="pipe-step">World Bank API</span>
         <span class="pipe-arrow" aria-hidden="true">→</span>
         <span class="pipe-step">Parquet cache</span>
         <span class="pipe-arrow" aria-hidden="true">→</span>
-        <span class="pipe-step">Analysis</span>
+        <span class="pipe-step">Facts packet</span>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <span class="pipe-step">Ridge baseline + OLS</span>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <span class="pipe-step">LLM briefing</span>
         <span class="pipe-arrow" aria-hidden="true">→</span>
         <span class="pipe-step">This report</span>
       </div>
     </section>
+
+    {briefing_html}
 
     {"".join(plot_fragments)}
 
@@ -547,9 +675,22 @@ def build_report(long: pd.DataFrame | None = None, path: Path = REPORT_PATH) -> 
       <h2>Regression: inflation on unemployment</h2>
       <p class="meta">
         Pooled OLS with country intercepts on the six-country sample.
-        R² = {model.rsquared:.3f}, n = {int(model.nobs)}. Descriptive association only.
+        R² = {facts.regression.r_squared:.3f}, n = {facts.regression.n}. Descriptive association only.
       </p>
       {_df_to_html_table(reg_table)}
+    </section>
+
+    <section>
+      <h2>Inflation forecast baseline</h2>
+      <p class="meta">
+        sklearn Ridge on lagged inflation, unemployment, and GDP growth vs a last-value naive forecast.
+        Train {facts.forecast.train_years} (n={facts.forecast.n_train});
+        test {facts.forecast.test_years} (n={facts.forecast.n_test}).
+        Holdout MAE: Ridge {facts.forecast.test_mae}, naive {facts.forecast.naive_mae}.
+        {baseline_note}
+        Horizon year {facts.forecast.horizon_year} uses the latest available lags — not a policy forecast.
+      </p>
+      {forecast_html}
     </section>
 
     <section>
@@ -557,7 +698,8 @@ def build_report(long: pd.DataFrame | None = None, path: Path = REPORT_PATH) -> 
       <p class="caveats">
         Annual World Bank series can lag and omit country-years (especially unemployment).
         The World aggregate is size-weighted; the six-country median is not.
-        Correlation and regression coefficients are not causal claims.
+        Correlation, regression, and Ridge coefficients are not causal claims.
+        The briefing model sees only the facts packet, not the raw panel.
         Inflation snapshot year: {snap_year}.{outlier_note}
       </p>
     </section>
@@ -570,8 +712,19 @@ def build_report(long: pd.DataFrame | None = None, path: Path = REPORT_PATH) -> 
 
 
 def main() -> None:
-    path = build_report()
-    print(path)
+    import argparse
+
+    from brief import generate_briefing
+
+    parser = argparse.ArgumentParser(description="Render report.html")
+    parser.add_argument("--fixture", action="store_true")
+    parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--skip-llm", action="store_true")
+    args = parser.parse_args()
+    long = load_panel(refresh=args.refresh, use_fixture=args.fixture)
+    facts = build_facts(long)
+    briefing = generate_briefing(facts, skip=args.skip_llm)
+    print(build_report(long, facts=facts, briefing=briefing))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ MIN_COUNTRIES = 50
 
 DATA_DIR = Path(__file__).resolve().parent / "data" / "raw"
 CACHE_PATH = DATA_DIR / "world_bank_indicators.parquet"
+FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "world_bank_sample.parquet"
 
 
 def _get_json(url: str, params: dict) -> list:
@@ -154,6 +155,14 @@ def load_or_fetch(path: Path = CACHE_PATH, refresh: bool = False) -> pd.DataFram
     frame = fetch_panel()
     save_panel(frame, path)
     return frame
+
+
+def load_panel(*, refresh: bool = False, use_fixture: bool = False) -> pd.DataFrame:
+    if use_fixture:
+        if not FIXTURE_PATH.exists():
+            raise FileNotFoundError(FIXTURE_PATH)
+        return pd.read_parquet(FIXTURE_PATH)
+    return load_or_fetch(CACHE_PATH, refresh=refresh)
 
 
 def main() -> None:
