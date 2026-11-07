@@ -1,10 +1,8 @@
-# Economic data (v1)
+# Economic data
 
-Question this experiment answers:
+World Bank annual indicators: GDP growth, CPI inflation, and unemployment from 2000 onward.
 
-> Since 2000, how do GDP growth, inflation, and unemployment move together — globally, and in a few large economies?
-
-The cache is **all countries** plus the World Bank **World** (`WLD`) aggregate. Charts and the regression still zoom in on six large economies, because 200 overlapping lines are not a better global view than the World series.
+The cache includes all available countries plus the World (`WLD`) aggregate. Analysis highlights the World series, a six-country comparison set, and a pooled regression on that set.
 
 ## Setup
 
@@ -20,13 +18,14 @@ pip install -r requirements.txt
 
 ```bash
 python experiments/economic-data/fetch_world_bank.py
-python experiments/economic-data/render_figures.py
+python experiments/economic-data/render_report.py
 jupyter notebook experiments/economic-data/analyze.ipynb
 ```
 
-`fetch_world_bank.py` writes `data/raw/world_bank_indicators.parquet` (gitignored). `render_figures.py` writes PNGs to `figures/`. The notebook loads the cache (and fetches if it is missing or still the old six-country file).
+`fetch_world_bank.py` writes `data/raw/world_bank_indicators.parquet` (gitignored).  
+`render_report.py` writes `report.html` — open it in a browser for charts and tables.
 
-## Scope
+## Indicators
 
 | Indicator | World Bank code |
 | --- | --- |
@@ -34,12 +33,5 @@ jupyter notebook experiments/economic-data/analyze.ipynb
 | Inflation, CPI (% annual) | `FP.CPI.TOTL.ZG` |
 | Unemployment (% of labor force) | `SL.UEM.TOTL.ZS` |
 
-- **Global series:** World Bank World aggregate (`WLD`)
-- **Close-up:** United States, China, Germany, India, Brazil, Japan
-- **Years:** 2000 through the latest World Bank year
-
-All-country rows are in the parquet for snapshots (for example the latest-year inflation histogram). They are not all plotted as time series, and they are not all thrown into one unweighted regression.
-
-## Later
-
-A simple forecast, interest rates, and an LLM write-up of the findings.
+**World aggregate:** `WLD`  
+**Comparison set:** United States, China, Germany, India, Brazil, Japan
